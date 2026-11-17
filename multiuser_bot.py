@@ -40,7 +40,7 @@ NOTICE = (
 )
 
 pending_logins: dict[int, tuple[object, asyncio.Task]] = {}
-pending_sends: dict[int, tuple[int, list[int], str]] = {}
+pending_sends: dict[int, tuple[int, list[int], str]] = {}\nactive_jobs: dict[int, asyncio.Task] = {}
 
 
 def notice_keyboard():
@@ -274,20 +274,13 @@ async def main() -> None:
         await callback.message.edit_text("Отправка отменена.")
         await callback.answer()
 
-    @dp.callback_query(F.data == "send:confirm")
-    async def confirm_send(callback: CallbackQuery) -> None:
-        uid = callback.from_user.id
-        pending = pending_sends.pop(uid, None)
-        if not pending:
-            return await callback.answer("Задача устарела. Подготовьте /send заново.", show_alert=True)
-        account_id, chat_ids, text_to_send = pending
+    async def execute_broadcast(uid: int, account_id: int, chat_ids: list[int], text_to_send: str, status_message):
         job_id = None
         client = None
         sent = 0
         skipped = 0
-        await callback.message.edit_text("⏳ Отправка запущена. Остановить её можно командой /stop.")
         try:
-            job_id = await service.create_broadcast_job(uid, account_id, callback.message.message_id, chat_ids)
+            job_id = await service.create_broadcast_job(uid, account_id, status_message.message_id, chat_ids)
             await service.change_job_status(uid, job_id, "running")
             session_string = await service.get_account_session(uid, account_id)
             client = new_user_client(session_string, uid)
@@ -301,13 +294,21 @@ async def main() -> None:
                     sent += 1
                 except FloodWait as exc:
                     await service.change_job_status(uid, job_id, "failed")
-                    await callback.message.answer(
+                    await status_message.answer(
                         f"Telegram ограничил отправку (FloodWait {exc.value} сек.). "
                         "Задача остановлена; обходить ограничение не будем."
                     )
                     return
             await service.change_job_status(uid, job_id, "completed")
-            await callback.message.answer(f"Готово. Отправлено: {sent}; пропущено после отзыва разрешения: {skipped}.")
+            await status_message.answer(f"Готово. Отправлено: {sent}; пропущено после отзыва разрешения: {skipped}.")
+        except asyncio.CancelledError:
+            if job_id is not None:
+                try:
+                    await service.change_job_status(uid, job_id, "cancelled")
+                except Exception:
+                    pass
+            await status_message.answer(f"Отправка остановлена. Успешно отправлено до остановки: {sent}.")
+            raise
         except Exception as exc:
             logging.exception("broadcast job failed")
             if job_id is not None:
@@ -315,20 +316,36 @@ async def main() -> None:
                     await service.change_job_status(uid, job_id, "failed")
                 except Exception:
                     pass
-            await callback.message.answer(f"Задача остановлена из-за ошибки ({type(exc).__name__}).")
+            await status_message.answer(f"Задача остановлена из-за ошибки ({type(exc).__name__}).")
         finally:
             if client is not None:
                 try:
                     await client.stop()
                 except Exception:
                     pass
-        await callback.answer()
+            active_jobs.pop(uid, None)
+
+    @dp.callback_query(F.data == "send:confirm")
+    async def confirm_send(callback: CallbackQuery) -> None:
+        uid = callback.from_user.id
+        pending = pending_sends.pop(uid, None)
+        if not pending:
+            return await callback.answer("Задача устарела. Подготовьте /send заново.", show_alert=True)
+        if uid in active_jobs:
+            return await callback.answer("У вас уже выполняется отправка.", show_alert=True)
+        account_id, chat_ids, text_to_send = pending
+        await callback.message.edit_text("⏳ Отправка запущена. Для остановки используйте /stop.")
+        task = asyncio.create_task(execute_broadcast(uid, account_id, chat_ids, text_to_send, callback.message))
+        active_jobs[uid] = task
+        await callback.answer("Запущено")
 
     @dp.message(Command("stop"))
     async def stop(message: Message) -> None:
-        # Sending is sequential and the confirmation handler owns the task. This
-        # command remains a clear UX signal; cancellation is implemented in the next worker revision.
-        await message.answer("Команда остановки принята. Если отправка уже идёт, она завершится после текущего запроса.")
+        task = active_jobs.get(message.from_user.id)
+        if task is None:
+            return await message.answer("Активной отправки нет.")
+        task.cancel()
+        await message.answer("Запрос на остановку отправлен.")
 
     @dp.message(Command("disconnect"))
     async def disconnect(message: Message) -> None:
