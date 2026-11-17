@@ -115,13 +115,9 @@ async def main() -> None:
     async def accept_notice(callback: CallbackQuery) -> None:
         await service.accept_notice(callback.from_user.id, NOTICE_VERSION)
         await callback.message.edit_text(
-            "✅ Уведомление принято.\n\n"
-            "/connect — подключить аккаунт по номеру и коду\n/cancel — отменить подключение\n"
-            "/chats — выбрать разрешённые группы\n"
-            "/send текст — подготовить отправку\n"
-            "/status — статус; /disconnect — отключить аккаунт",
-            reply_markup=main_keyboard(),
+            "✅ Уведомление принято. Теперь можно пользоваться главным меню."
         )
+        await callback.message.answer("Главное меню:", reply_markup=main_keyboard())
         await callback.answer("Сохранено")
 
     @dp.callback_query(F.data == "notice:decline")
