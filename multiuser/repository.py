@@ -315,3 +315,28 @@ async def list_jobs(session: AsyncSession, telegram_user_id: int) -> list[Broadc
         .order_by(BroadcastJob.created_at.desc(), BroadcastJob.id.desc())
     )
     return list(result)
+
+
+
+async def accept_privacy_notice(
+    session: AsyncSession, telegram_user_id: int, version: str
+) -> User:
+    """Record the user's explicit acceptance of the currently shown notice."""
+    user = await session.get(User, telegram_user_id)
+    if user is None or not user.is_active:
+        raise NotFound("active user not found")
+    if not version or len(version) > 32:
+        raise ValueError("invalid privacy notice version")
+    user.terms_accepted_at = datetime.now(timezone.utc)
+    user.privacy_notice_version = version
+    await session.flush()
+    return user
+
+
+async def delete_user_data(session: AsyncSession, telegram_user_id: int) -> None:
+    """Delete the user's service records. Caller must revoke Telegram sessions separately."""
+    user = await session.get(User, telegram_user_id)
+    if user is None:
+        return
+    await session.delete(user)
+    await session.flush()
