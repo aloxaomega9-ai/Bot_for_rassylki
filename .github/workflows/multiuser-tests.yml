@@ -25,7 +25,7 @@ jobs:
       - name: Compile Python files
         run: python -m compileall -q multiuser multiuser_bot.py
       - name: Run repository tests
-        run: pytest -q --junitxml=pytest-report.xml
+        run: python -m pytest -q --junitxml=pytest-report.xml
       - name: Upload test report
         if: always()
         uses: actions/upload-artifact@v4
