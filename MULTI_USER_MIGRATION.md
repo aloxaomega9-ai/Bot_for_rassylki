@@ -43,7 +43,7 @@ Install `dev-requirements.txt` and run `pytest`. Tests use an in-memory SQLite d
 ## Rollout
 1. Add isolated database/security primitives.
 2. Add owner-scoped repository, service layer and tests.
-3. A separate `multiuser_bot.py` onboarding entry point supports registration, privacy notice acceptance, profile status and profile-data deletion; it does not connect accounts or send messages.
+3. A separate `multiuser_bot.py` entry point supports registration, privacy notice acceptance, phone-code account login with optional 2FA, explicit group authorization, confirmed text broadcasts, cancellation, disconnect and profile deletion.
 4. Run its tests and review database setup before any launch. Do not replace `main.py` yet.
 5. Verify tenant isolation, encryption, stop/cancel behavior, and authorization checks.
 6. Only after explicit approval, configure Render and deploy the new entry point.
