@@ -19,6 +19,8 @@ class User(Base):
     telegram_user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    terms_accepted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    privacy_notice_version: Mapped[Optional[str]] = mapped_column(String(32))
 
 
 class ConnectedAccount(Base):
