@@ -1,8 +1,7 @@
 """Multi-user Telegram broadcast bot.
 
-Account authorization uses Telegram's QR-device approval flow. The bot never asks
-for login codes or cloud passwords. Sending is limited to destinations that the
-owner explicitly authorizes and is capped at 50 chats per confirmed job.
+Account authorization uses phone-code login with optional 2FA. One-time
+credentials are used only in memory and are never persisted or logged.
 """
 import asyncio
 import logging
@@ -13,7 +12,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
-from aiogram.types import BufferedInputFile, CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from pyrogram.errors import FloodWait, SessionPasswordNeeded
 from sqlalchemy import select
@@ -30,8 +29,9 @@ NOTICE = (
     "Сервис хранит ваш Telegram ID и зашифрованную сессию подключённого аккаунта. "
     "Сервер сможет использовать эту сессию, пока аккаунт подключён. Шифрование "
     "защищает данные в базе, но не скрывает их от работающего приложения.\n\n"
-    "Подключение подтверждается QR-кодом в официальном приложении Telegram. "
-    "Бот не просит коды входа или облачный пароль. Вы можете отключить аккаунт "
+    "Подключение проходит по номеру телефона и коду Telegram; при включённой "
+    "двухэтапной проверке понадобится пароль. Код и пароль используются только "
+    "во время входа и не сохраняются в базе. Вы можете отключить аккаунт "
     "командой /disconnect.\n\n"
     "Отправка разрешена только в группы, где у вас есть разрешение и участники "
     "ожидают сообщения. Не используйте сервис для нежелательных рассылок. "
@@ -148,7 +148,7 @@ async def main() -> None:
         else:
             await message.answer("Нет активного процесса подключения.")
 
-    @dp.message(F.text)
+    @dp.message(F.text & ~F.text.startswith("/"))
     async def process_login_input(message: Message) -> None:
         uid = message.from_user.id
         state = pending_logins.get(uid)
@@ -187,7 +187,7 @@ async def main() -> None:
                     "Если передумали, используйте /cancel."
                 )
             except Exception as exc:
-                logging.exception("Could not request Telegram login code")
+                logging.warning("Could not request Telegram login code: %s", type(exc).__name__)
                 try:
                     if client.is_connected:
                         await client.disconnect()
