@@ -7,7 +7,6 @@ owner explicitly authorizes and is capped at 50 chats per confirmed job.
 import asyncio
 import logging
 import os
-import time
 
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
@@ -16,13 +15,13 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from pyrogram.errors import FloodWait
+from pyrogram.errors import FloodWait, SessionPasswordNeeded
 from sqlalchemy import select
 
 from multiuser.db import dispose_engine, get_session_factory
 from multiuser.models import AuthorizedChat, ConnectedAccount, User
 from multiuser.service import MultiUserService
-from multiuser.telegram import begin_qr_login, new_login_client, new_user_client
+from multiuser.telegram import new_login_client, new_user_client
 
 
 NOTICE_VERSION = "2026-11-17"
@@ -40,7 +39,7 @@ NOTICE = (
     "Нажимая «Принимаю», вы подтверждаете, что прочитали это уведомление."
 )
 
-pending_logins: dict[int, tuple[object, asyncio.Task]] = {}
+pending_logins: dict[int, dict] = {}
 pending_sends: dict[int, tuple[int, list[int], str]] = {}
 active_jobs: dict[int, asyncio.Task] = {}
 
@@ -104,7 +103,7 @@ async def main() -> None:
         await service.accept_notice(callback.from_user.id, NOTICE_VERSION)
         await callback.message.edit_text(
             "✅ Уведомление принято.\n\n"
-            "/connect — подключить аккаунт по QR\n"
+            "/connect — подключить аккаунт по номеру и коду\n/cancel — отменить подключение\n"
             "/chats — выбрать разрешённые группы\n"
             "/send текст — подготовить отправку\n"
             "/status — статус; /disconnect — отключить аккаунт"
@@ -119,65 +118,143 @@ async def main() -> None:
     @dp.message(Command("connect"))
     async def connect(message: Message) -> None:
         uid = message.from_user.id
+        if message.chat.type != "private":
+            return await message.answer("Подключение аккаунта доступно только в личном чате с ботом.")
         if not await accepted(service, uid):
             return await message.answer("Сначала отправьте /start и примите уведомление.")
         if await service.accounts(uid):
             return await message.answer("У вас уже подключён один аккаунт. Сначала используйте /disconnect.")
         if uid in pending_logins:
-            return await message.answer("QR-вход уже запущен. Проверьте предыдущее сообщение.")
-        status = await message.answer("Готовлю QR-подключение…")
-        client = None
-        try:
-            client = new_login_client(uid)
-            login, png = await begin_qr_login(client)
-            photo = BufferedInputFile(png, filename="telegram-login.png")
-            await status.delete()
-            await message.answer_photo(
-                photo,
-                caption=(
-                    "Откройте Telegram на другом устройстве: Настройки → Устройства → "
-                    "Подключить устройство, затем отсканируйте QR.\n\n"
-                    "Не пересылайте QR-код другим людям. Он даёт доступ к вашему аккаунту. "
-                    "Код действителен ограниченное время."
-                ),
-            )
+            return await message.answer("Вход уже начат. Продолжите по инструкции или используйте /cancel.")
+        await message.answer(
+            "Отправьте номер телефона в международном формате, например +7XXXXXXXXXX.\n"
+            "Telegram пришлёт код в приложение Telegram или другим доступным способом. "
+            "Никому не пересылайте этот код. Бот использует его только для подключения вашего аккаунта."
+        )
+        pending_logins[uid] = {"stage": "phone"}
 
-            async def finish_login():
-                try:
-                    timeout = max(1, login.r.expires - int(time.time()))
-                    user = await login.wait(timeout=timeout)
-                    session_string = await client.export_session_string()
-                    await client.disconnect()
-                    account_id = await service.connect_account(uid, session_string, user.first_name)
-                    await bot.send_message(
-                        uid,
-                        f"✅ Аккаунт подключён: <b>{user.first_name}</b> (ID записи: {account_id}).\n"
-                        "Теперь выполните /chats и вручную разрешите нужные группы."
-                    )
-                except asyncio.TimeoutError:
-                    await bot.send_message(uid, "QR-код истёк. Запустите /connect ещё раз.")
-                except Exception as exc:
-                    logging.exception("QR login failed")
-                    await bot.send_message(uid, f"Не удалось подключить аккаунт ({type(exc).__name__}).")
-                finally:
-                    try:
-                        if client.is_connected:
-                            await client.disconnect()
-                    except Exception:
-                        pass
-                    pending_logins.pop(uid, None)
-
-            task = asyncio.create_task(finish_login())
-            pending_logins[uid] = (client, task)
-        except Exception as exc:
-            logging.exception("could not start QR login")
+    @dp.message(Command("cancel"))
+    async def cancel_login(message: Message) -> None:
+        state = pending_logins.pop(message.from_user.id, None)
+        if state:
+            client = state.get("client")
             if client is not None:
                 try:
                     if client.is_connected:
                         await client.disconnect()
                 except Exception:
+                    logging.exception("temporary login disconnect failed")
+            await message.answer("Подключение отменено.")
+        else:
+            await message.answer("Нет активного процесса подключения.")
+
+    @dp.message(F.text)
+    async def process_login_input(message: Message) -> None:
+        uid = message.from_user.id
+        state = pending_logins.get(uid)
+        if not state:
+            return
+        if message.chat.type != "private":
+            return
+        value = (message.text or "").strip()
+        if value.startswith("/"):
+            return
+        stage = state["stage"]
+
+        # Remove one-time codes and 2FA passwords from the visible chat history.
+        if stage in {"code", "password"}:
+            try:
+                await message.delete()
+            except Exception:
+                logging.warning("Could not delete a sensitive login message from chat history")
+
+        if stage == "phone":
+            phone = value.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+            if not phone.startswith("+") or not phone[1:].isdigit() or not 8 <= len(phone[1:]) <= 15:
+                return await message.answer("Неверный формат. Отправьте номер в формате +7XXXXXXXXXX или используйте /cancel.")
+            client = new_login_client(uid)
+            try:
+                await client.connect()
+                sent_code = await client.send_code(phone)
+                pending_logins[uid] = {
+                    "stage": "code",
+                    "client": client,
+                    "phone": phone,
+                    "phone_code_hash": sent_code.phone_code_hash,
+                }
+                await message.answer(
+                    "Код отправлен Telegram. Введите его следующим сообщением. "
+                    "Если передумали, используйте /cancel."
+                )
+            except Exception as exc:
+                logging.exception("Could not request Telegram login code")
+                try:
+                    if client.is_connected:
+                        await client.disconnect()
+                except Exception:
                     pass
-            await status.edit_text(f"Не удалось подготовить QR-вход ({type(exc).__name__}).")
+                pending_logins.pop(uid, None)
+                await message.answer(f"Не удалось запросить код ({type(exc).__name__}). Проверьте номер и попробуйте /connect.")
+            return
+
+        client = state["client"]
+        if stage == "code":
+            if not value.isdigit() or not 4 <= len(value) <= 8:
+                return await message.answer("Введите только цифры кода из Telegram или используйте /cancel.")
+            try:
+                user = await client.sign_in(state["phone"], state["phone_code_hash"], value)
+            except SessionPasswordNeeded:
+                state["stage"] = "password"
+                await message.answer(
+                    "На аккаунте включена двухэтапная проверка. Введите пароль Telegram. "
+                    "Сообщение с паролем будет удалено после получения; /cancel отменяет вход."
+                )
+                return
+            except Exception as exc:
+                logging.warning("Telegram phone-code sign-in failed: %s", type(exc).__name__)
+                pending_logins.pop(uid, None)
+                try:
+                    if client.is_connected:
+                        await client.disconnect()
+                except Exception:
+                    pass
+                await message.answer("Код не принят или срок его действия истёк. Начните заново командой /connect.")
+                return
+        elif stage == "password":
+            try:
+                user = await client.check_password(value)
+            except Exception as exc:
+                logging.warning("Telegram 2FA check failed: %s", type(exc).__name__)
+                pending_logins.pop(uid, None)
+                try:
+                    if client.is_connected:
+                        await client.disconnect()
+                except Exception:
+                    pass
+                await message.answer("Пароль не принят. Подключение отменено; запустите /connect заново.")
+                return
+        else:
+            pending_logins.pop(uid, None)
+            return
+
+        try:
+            session_string = await client.export_session_string()
+            await client.disconnect()
+            account_id = await service.connect_account(uid, session_string, getattr(user, "first_name", None))
+            await message.answer(
+                f"✅ Аккаунт подключён (ID записи: {account_id}).\n"
+                "Теперь выполните /chats и вручную разрешите только нужные группы."
+            )
+        except Exception as exc:
+            logging.exception("Could not save encrypted Telegram session")
+            await message.answer(f"Вход выполнен, но сохранить сессию не удалось ({type(exc).__name__}).")
+        finally:
+            try:
+                if client.is_connected:
+                    await client.disconnect()
+            except Exception:
+                pass
+            pending_logins.pop(uid, None)
 
     @dp.message(Command("chats"))
     async def chats(message: Message) -> None:
@@ -406,7 +483,7 @@ async def main() -> None:
     async def help_command(message: Message) -> None:
         await message.answer(
             "/start — регистрация и уведомление\n"
-            "/connect — подключение по QR\n"
+            "/connect — подключение по номеру и коду\n/cancel — отменить подключение\n"
             "/chats — найти группы и разрешить отправку\n"
             "/send текст — подготовить и подтвердить отправку\n"
             "/disconnect — отозвать подключённую сессию\n"
@@ -429,13 +506,14 @@ async def main() -> None:
         await dp.start_polling(bot)
     finally:
         await runner.cleanup()
-        for client, task in list(pending_logins.values()):
-            task.cancel()
+        for state in list(pending_logins.values()):
+            client = state.get("client")
             try:
-                if client.is_connected:
+                if client is not None and client.is_connected:
                     await client.disconnect()
             except Exception:
                 pass
+        pending_logins.clear()
         await bot.session.close()
         await dispose_engine()
 
