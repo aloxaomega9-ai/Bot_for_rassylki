@@ -11,7 +11,7 @@
 - A chat appearing in the connected account's dialog list is not consent.
 - No scraping recipients, unsolicited direct messages, or bypassing Telegram limits.
 - Jobs snapshot only explicitly authorized target chats. Re-check authorization immediately before sending each message.
-- The first prototype limits each job to 20 authorized chats and one active job per user.
+- The first prototype limits each job to 50 explicitly authorized chats and one active job per user.
 - Provide visible pause/stop controls and cancellation audit records.
 - Respect Telegram FloodWait and stop rather than attempting to evade platform limits.
 
