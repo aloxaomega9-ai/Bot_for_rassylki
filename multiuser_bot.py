@@ -19,7 +19,7 @@ from pyrogram.errors import FloodWait
 from sqlalchemy import select
 
 from multiuser.db import dispose_engine, get_session_factory
-from multiuser.models import AuthorizedChat, User
+from multiuser.models import AuthorizedChat, ConnectedAccount, User
 from multiuser.service import MultiUserService
 from multiuser.telegram import begin_qr_login, new_login_client, new_user_client
 
@@ -71,10 +71,11 @@ async def get_chats(user_id: int, account_id: int):
     async with factory() as session:
         result = await session.scalars(
             select(AuthorizedChat)
-            .join(__import__("multiuser.models", fromlist=["ConnectedAccount"]).ConnectedAccount)
+            .join(ConnectedAccount, AuthorizedChat.account_id == ConnectedAccount.id)
             .where(
                 AuthorizedChat.account_id == account_id,
-                __import__("multiuser.models", fromlist=["ConnectedAccount"]).ConnectedAccount.telegram_user_id == user_id,
+                ConnectedAccount.telegram_user_id == user_id,
+                ConnectedAccount.is_active.is_(True),
             )
             .order_by(AuthorizedChat.title)
         )
@@ -379,7 +380,25 @@ async def main() -> None:
 
     @dp.message(Command("delete_me"))
     async def delete_me(message: Message) -> None:
-        await message.answer("Сначала отключите аккаунт командой /disconnect, затем повторите /delete_me.")
+        uid = message.from_user.id
+        task = active_jobs.get(uid)
+        if task is not None:
+            task.cancel()
+        for account in await service.accounts(uid):
+            try:
+                session_string = await service.get_account_session(uid, account.id)
+                client = new_user_client(session_string, uid)
+                await client.start()
+                try:
+                    await client.log_out()
+                finally:
+                    if client.is_connected:
+                        await client.disconnect()
+            except Exception:
+                logging.exception("could not revoke Telegram session during profile deletion")
+            await service.disconnect(uid, account.id)
+        await service.delete_user(uid)
+        await message.answer("Данные профиля удалены. Подключённые сессии отозваны, если Telegram был доступен.")
 
     @dp.message(Command("help"))
     async def help_command(message: Message) -> None:
