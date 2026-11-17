@@ -162,7 +162,7 @@ async def main() -> None:
         stage = state["stage"]
 
         # Remove one-time codes and 2FA passwords from the visible chat history.
-        if stage in {"code", "password"}:
+        if stage in {"phone", "code", "password"}:
             try:
                 await message.delete()
             except Exception:
