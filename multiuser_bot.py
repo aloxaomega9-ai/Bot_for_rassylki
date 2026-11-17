@@ -12,7 +12,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from pyrogram.errors import FloodWait, SessionPasswordNeeded
 from sqlalchemy import select
@@ -42,6 +42,19 @@ NOTICE = (
 pending_logins: dict[int, dict] = {}
 pending_sends: dict[int, tuple[int, list[int], str]] = {}
 active_jobs: dict[int, asyncio.Task] = {}
+
+
+def main_keyboard():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📨 Авторассылка"), KeyboardButton(text="📝 Текст сообщения")],
+            [KeyboardButton(text="👥 Настройка групп"), KeyboardButton(text="⏱ Интервал")],
+            [KeyboardButton(text="👤 Профили"), KeyboardButton(text="📖 Инструкция")],
+            [KeyboardButton(text="⏹ Остановить"), KeyboardButton(text="❔ Помощь")],
+        ],
+        resize_keyboard=True,
+        input_field_placeholder="Выберите действие",
+    )
 
 
 def notice_keyboard():
@@ -106,7 +119,8 @@ async def main() -> None:
             "/connect — подключить аккаунт по номеру и коду\n/cancel — отменить подключение\n"
             "/chats — выбрать разрешённые группы\n"
             "/send текст — подготовить отправку\n"
-            "/status — статус; /disconnect — отключить аккаунт"
+            "/status — статус; /disconnect — отключить аккаунт",
+            reply_markup=main_keyboard(),
         )
         await callback.answer("Сохранено")
 
@@ -478,6 +492,49 @@ async def main() -> None:
             await service.disconnect(uid, account.id)
         await service.delete_user(uid)
         await message.answer("Данные профиля удалены. Подключённые сессии отозваны, если Telegram был доступен.")
+
+
+    @dp.message(F.text == "📨 Авторассылка")
+    async def menu_broadcast(message: Message) -> None:
+        await message.answer("Подготовить отправку: /send ваш текст. Бот запросит подтверждение перед началом.")
+
+    @dp.message(F.text == "📝 Текст сообщения")
+    async def menu_text(message: Message) -> None:
+        await message.answer("Введите текст командой: /send ваш текст сообщения")
+
+    @dp.message(F.text == "👥 Настройка групп")
+    async def menu_chats(message: Message) -> None:
+        await message.answer("Откройте список групп: /chats. Нажмите на группу, чтобы разрешить или запретить отправку.")
+
+    @dp.message(F.text == "⏱ Интервал")
+    async def menu_interval(message: Message) -> None:
+        await message.answer("Настройка интервала пока не реализована. Кнопка оставлена как пункт будущего обновления.")
+
+    @dp.message(F.text == "👤 Профили")
+    async def menu_profiles(message: Message) -> None:
+        accounts = await service.accounts(message.from_user.id)
+        if accounts:
+            labels = [account.label or f"Аккаунт #{account.id}" for account in accounts]
+            await message.answer("Подключённый профиль:\\n" + "\\n".join(labels) + "\\nОтключить: /disconnect")
+        else:
+            await message.answer("Аккаунт ещё не подключён. Для подключения: /connect")
+
+    @dp.message(F.text == "⏹ Остановить")
+    async def menu_stop(message: Message) -> None:
+        task = active_jobs.get(message.from_user.id)
+        if task is None:
+            await message.answer("Активной отправки нет.")
+        else:
+            task.cancel()
+            await message.answer("Запрос на остановку отправлен.")
+
+    @dp.message(F.text.in_({"📖 Инструкция", "❔ Помощь"}))
+    async def menu_help(message: Message) -> None:
+        await message.answer("Подключение: /connect\\nГруппы: /chats\\nОтправка: /send текст\\nОтмена входа: /cancel\\nОтключение: /disconnect\\nСтатус: /status", reply_markup=main_keyboard())
+
+    @dp.message(Command("menu"))
+    async def show_menu(message: Message) -> None:
+        await message.answer("Главное меню:", reply_markup=main_keyboard())
 
     @dp.message(Command("help"))
     async def help_command(message: Message) -> None:
