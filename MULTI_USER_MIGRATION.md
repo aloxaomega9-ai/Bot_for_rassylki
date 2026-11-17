@@ -1,10 +1,11 @@
 # Multi-user migration (phase 1)
 
 ## Scope
-- The existing `main.py` remains the single-owner application until the replacement is tested.
+- `main.py` is now the public multi-user entry point and runs `multiuser_bot.py` with the existing `BOT_TOKEN`.
+- The previous single-owner application is preserved as `legacy_main.py` for reference; it is not started by the current entry point.
 - First release: one connected Telegram account per service user. The account table can support multiple accounts later, but the repository enforces one active account per user now.
 - User-owned records are always queried with the Telegram owner ID.
-- No deployment or production environment changes are part of this phase.
+- This code change does not deploy or modify the live Render service.
 
 ## Messaging safety
 - Only send to chats where the account owner has permission and messages are expected/explicitly opted into.
@@ -43,7 +44,7 @@ Install `dev-requirements.txt` and run `pytest`. Tests use an in-memory SQLite d
 ## Rollout
 1. Add isolated database/security primitives.
 2. Add owner-scoped repository, service layer and tests.
-3. A separate `multiuser_bot.py` entry point supports registration, privacy notice acceptance, phone-code account login with optional 2FA, explicit group authorization, confirmed text broadcasts, cancellation, disconnect and profile deletion.
-4. Run its tests and review database setup before any launch. Do not replace `main.py` yet.
-5. Verify tenant isolation, encryption, stop/cancel behavior, and authorization checks.
-6. Only after explicit approval, configure Render and deploy the new entry point.
+3. `multiuser_bot.py` supports public registration, privacy notice acceptance, phone-code account login with optional 2FA, explicit group authorization, confirmed text broadcasts, cancellation, disconnect and profile deletion. `main.py` launches this entry point.
+4. The old single-admin bot source is preserved in `legacy_main.py`; its old single-account UI is not part of the public multi-user runtime.
+5. Run CI and review database setup before launch. Verify tenant isolation, encryption, stop/cancel behavior, and authorization checks.
+6. Render still needs the database and encryption secrets configured before the public entry point can start. Do not point production at this branch until those are configured and the CI run passes.
