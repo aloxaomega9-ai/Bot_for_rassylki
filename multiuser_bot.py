@@ -73,6 +73,17 @@ def confirm_keyboard():
     return keyboard.as_markup()
 
 
+def interval_keyboard(current: int):
+    keyboard = InlineKeyboardBuilder()
+    for seconds in (30, 60, 120, 300):
+        label = f"{seconds} сек." if seconds < 60 else f"{seconds // 60} мин."
+        if seconds == current:
+            label = "✓ " + label
+        keyboard.button(text=label, callback_data=f"interval:set:{seconds}")
+    keyboard.adjust(2)
+    return keyboard.as_markup()
+
+
 async def accepted(service: MultiUserService, user_id: int) -> bool:
     factory = get_session_factory()
     async with factory() as session:
@@ -375,13 +386,16 @@ async def main() -> None:
             session_string = await service.get_account_session(uid, account_id)
             client = new_user_client(session_string, uid)
             await client.start()
-            for chat_id in chat_ids:
+            interval_seconds = await service.get_interval(uid)
+            for index, chat_id in enumerate(chat_ids):
                 if not await service.chat_is_authorized(uid, account_id, chat_id):
                     skipped += 1
                     continue
                 try:
                     await client.send_message(chat_id, text_to_send)
                     sent += 1
+                    if index < len(chat_ids) - 1:
+                        await asyncio.sleep(interval_seconds)
                 except FloodWait as exc:
                     await service.change_job_status(uid, job_id, "failed")
                     await status_message.answer(
@@ -504,7 +518,28 @@ async def main() -> None:
 
     @dp.message(F.text == "⏱ Интервал")
     async def menu_interval(message: Message) -> None:
-        await message.answer("Настройка интервала пока не реализована. Кнопка оставлена как пункт будущего обновления.")
+        seconds = await service.get_interval(message.from_user.id)
+        await message.answer(
+            f"⏱ <b>Интервал между сообщениями</b>\n\n"
+            f"Сейчас: <b>{seconds} сек.</b>\n"
+            "Выберите паузу между отправками в разрешённые группы:",
+            reply_markup=interval_keyboard(seconds),
+        )
+
+    @dp.callback_query(F.data.startswith("interval:set:"))
+    async def set_interval(callback: CallbackQuery) -> None:
+        try:
+            seconds = int(callback.data.rsplit(":", 1)[1])
+            await service.set_interval(callback.from_user.id, seconds)
+            label = f"{seconds} сек." if seconds < 60 else f"{seconds // 60} мин."
+            await callback.message.edit_text(
+                f"✅ Интервал сохранён: <b>{label}</b>. Он будет применяться к следующим рассылкам.",
+                reply_markup=interval_keyboard(seconds),
+            )
+            await callback.answer("Настройка сохранена")
+        except Exception:
+            logging.exception("Could not update broadcast interval")
+            await callback.answer("Не удалось сохранить интервал", show_alert=True)
 
     @dp.message(F.text == "👤 Профили")
     async def menu_profiles(message: Message) -> None:
