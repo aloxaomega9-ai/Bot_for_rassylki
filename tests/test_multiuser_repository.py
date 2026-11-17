@@ -4,13 +4,15 @@ import pytest_asyncio
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from multiuser.models import Base, BroadcastJobTarget, ConnectedAccount
+from multiuser.models import Base, BroadcastJobTarget, ConnectedAccount, User
 from multiuser.repository import (
     AlreadyConnected,
     AuthorizationRequired,
     NotFound,
     RepositoryError,
     add_account,
+    accept_privacy_notice,
+    delete_user_data,
     add_chat,
     create_job,
     disconnect_account,
@@ -122,3 +124,28 @@ async def test_job_rejects_more_than_50_chats(session):
 
     with pytest.raises(RepositoryError, match="50 chats"):
         await create_job(session, 606, account.id, 9003, chat_ids)
+
+
+@pytest.mark.asyncio
+async def test_privacy_notice_acceptance_is_recorded(session):
+    await register_user(session, 707)
+    user = await accept_privacy_notice(session, 707, "2026-11-17")
+    assert user.terms_accepted_at is not None
+    assert user.privacy_notice_version == "2026-11-17"
+
+
+@pytest.mark.asyncio
+async def test_user_deletion_removes_owned_service_records(session):
+    await register_user(session, 808)
+    account = await add_account(session, 808, "encrypted-session-f")
+    chat = await add_chat(session, 808, account.id, -400123, "Opt-in group")
+    await set_chat_authorization(
+        session, 808, account.id, chat.chat_id, True, explicitly_confirmed=True
+    )
+    job = await create_job(session, 808, account.id, 9004, [chat.chat_id])
+
+    await delete_user_data(session, 808)
+
+    assert await session.get(User, 808) is None
+    assert await session.get(ConnectedAccount, account.id) is None
+    assert await session.get(BroadcastJobTarget, (job.id, chat.id)) is None
