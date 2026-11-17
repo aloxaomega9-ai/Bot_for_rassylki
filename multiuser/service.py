@@ -10,6 +10,8 @@ from multiuser.db import get_session_factory
 from multiuser.repository import (
     add_account,
     add_chat,
+    accept_privacy_notice,
+    delete_user_data,
     create_job,
     disconnect_account,
     get_owned_account,
@@ -125,3 +127,14 @@ class MultiUserService:
             async with session.begin():
                 job = await set_job_status(session, telegram_user_id, job_id, status)
                 return job.status
+
+
+    async def accept_notice(self, telegram_user_id: int, version: str) -> None:
+        async with self._session_factory() as session:
+            async with session.begin():
+                await accept_privacy_notice(session, telegram_user_id, version)
+
+    async def delete_user(self, telegram_user_id: int) -> None:
+        async with self._session_factory() as session:
+            async with session.begin():
+                await delete_user_data(session, telegram_user_id)
