@@ -9,6 +9,7 @@ from multiuser.repository import (
     AlreadyConnected,
     AuthorizationRequired,
     NotFound,
+    RepositoryError,
     add_account,
     add_chat,
     create_job,
@@ -92,3 +93,32 @@ async def test_disconnect_revokes_stored_credential(session):
     revoked = await get_owned_account(session, 404, account.id, active_only=False)
     assert revoked.is_active is False
     assert revoked.encrypted_session is None
+
+
+@pytest.mark.asyncio
+async def test_job_allows_up_to_50_explicitly_authorized_chats(session):
+    await register_user(session, 505)
+    account = await add_account(session, 505, "encrypted-session-d")
+    chat_ids = []
+    for chat_id in range(-200000, -199950):
+        chat = await add_chat(session, 505, account.id, chat_id, "Opt-in chat")
+        await set_chat_authorization(
+            session, 505, account.id, chat_id, True, explicitly_confirmed=True
+        )
+        chat_ids.append(chat.chat_id)
+
+    job = await create_job(session, 505, account.id, 9002, chat_ids)
+    targets = await session.scalars(
+        select(BroadcastJobTarget).where(BroadcastJobTarget.job_id == job.id)
+    )
+    assert len(list(targets)) == 50
+
+
+@pytest.mark.asyncio
+async def test_job_rejects_more_than_50_chats(session):
+    await register_user(session, 606)
+    account = await add_account(session, 606, "encrypted-session-e")
+    chat_ids = list(range(-300000, -299949))
+
+    with pytest.raises(RepositoryError, match="50 chats"):
+        await create_job(session, 606, account.id, 9003, chat_ids)
