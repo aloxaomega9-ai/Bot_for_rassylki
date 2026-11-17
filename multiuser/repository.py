@@ -10,7 +10,7 @@ Every lookup that touches a tenant-owned row includes the Telegram owner ID.
 from datetime import datetime, timezone
 from typing import Sequence
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 
@@ -334,9 +334,22 @@ async def accept_privacy_notice(
 
 
 async def delete_user_data(session: AsyncSession, telegram_user_id: int) -> None:
-    """Delete the user's service records. Caller must revoke Telegram sessions separately."""
+    """Delete service records in FK-safe order. Caller must revoke Telegram sessions separately."""
     user = await session.get(User, telegram_user_id)
     if user is None:
         return
+
+    owned_job_ids = select(BroadcastJob.id).where(
+        BroadcastJob.telegram_user_id == telegram_user_id
+    )
+    await session.execute(
+        delete(BroadcastJobTarget).where(BroadcastJobTarget.job_id.in_(owned_job_ids))
+    )
+    await session.execute(delete(BroadcastJob).where(
+        BroadcastJob.telegram_user_id == telegram_user_id
+    ))
+    await session.execute(delete(ConnectedAccount).where(
+        ConnectedAccount.telegram_user_id == telegram_user_id
+    ))
     await session.delete(user)
     await session.flush()
