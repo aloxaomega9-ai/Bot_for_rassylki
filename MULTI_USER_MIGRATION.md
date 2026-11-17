@@ -11,7 +11,8 @@
 - A chat appearing in the connected account's dialog list is not consent.
 - No scraping recipients, unsolicited direct messages, or bypassing Telegram limits.
 - Jobs snapshot only explicitly authorized target chats. Re-check authorization immediately before sending each message.
-- Provide visible pause/stop controls, per-user quotas, and cancellation audit records.
+- The first prototype limits each job to 20 authorized chats and one active job per user.
+- Provide visible pause/stop controls and cancellation audit records.
 - Respect Telegram FloodWait and stop rather than attempting to evade platform limits.
 
 ## Session security
@@ -21,18 +22,27 @@
 - Provide disconnect/revoke controls; disconnect clears the encrypted credential from the row.
 - Do not request one-time codes or cloud passwords in ordinary support chats.
 
-## Data model
+## Data model and service layer
 - `User`: Telegram identity and account status.
 - `ConnectedAccount`: encrypted session, owner and revocation state.
 - `AuthorizedChat`: possible destination; it is ineligible until explicitly authorized.
 - `BroadcastJob` / `BroadcastJobTarget`: owner-scoped jobs and a snapshot of approved target destinations.
+- `multiuser.service.MultiUserService`: transaction-managed operations for registration, account connection/disconnection, chat authorization and job state.
 
-## Database transactions
-Repository functions flush but do not commit. Call them inside `async with session.begin():` so related changes commit atomically. Give each concurrent operation its own `AsyncSession`.
+## Database transactions and setup
+Repository functions flush but do not commit. The service layer wraps each operation in its own transaction and session.
+For a **new, empty database only**, initialize tables with:
+```bash
+ALLOW_SCHEMA_CREATE=1 python -m multiuser.schema
+```
+This bootstrap does not alter existing tables. Use Alembic migrations for future schema changes. Never run schema setup against a database containing valuable data without a backup and review.
+
+## Tests
+Install `dev-requirements.txt` and run `pytest`. Tests use an in-memory SQLite database; production runtime remains PostgreSQL/asyncpg.
 
 ## Rollout
 1. Add isolated database/security primitives.
-2. Add owner-scoped repository and tests.
+2. Add owner-scoped repository, service layer and tests.
 3. Build a new multi-user bot entry point; do not replace `main.py` yet.
 4. Verify tenant isolation, encryption, stop/cancel behavior, and authorization checks.
 5. Only after explicit approval, configure Render and deploy the new entry point.
