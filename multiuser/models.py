@@ -1,6 +1,6 @@
 """SQLAlchemy models for the isolated multi-user application.
 
-These models are scaffolding only; the existing single-user bot does not import them.
+The legacy single-user main.py does not import these models.
 """
 from datetime import datetime
 from typing import Optional
@@ -29,7 +29,8 @@ class ConnectedAccount(Base):
         BigInteger, ForeignKey("users.telegram_user_id", ondelete="CASCADE"), nullable=False, index=True
     )
     label: Mapped[Optional[str]] = mapped_column(String(128))
-    encrypted_session: Mapped[str] = mapped_column(Text, nullable=False)
+    # NULL after disconnect: do not retain a credential after revocation.
+    encrypted_session: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
@@ -45,6 +46,7 @@ class AuthorizedChat(Base):
     )
     chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     title: Mapped[Optional[str]] = mapped_column(String(255))
+    # New chats are NOT eligible for messages until explicitly authorized.
     is_authorized: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     authorized_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
@@ -64,3 +66,18 @@ class BroadcastJob(Base):
     source_message_id: Mapped[Optional[int]] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+
+class BroadcastJobTarget(Base):
+    __tablename__ = "broadcast_job_targets"
+    __table_args__ = (UniqueConstraint("job_id", "authorized_chat_id", name="uq_job_authorized_chat"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("broadcast_jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    authorized_chat_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("authorized_chats.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
