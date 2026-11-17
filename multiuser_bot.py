@@ -162,7 +162,7 @@ async def main() -> None:
         else:
             await message.answer("Нет активного процесса подключения.")
 
-    @dp.message(F.text & ~F.text.startswith("/"))
+    @dp.message(F.text & ~F.text.startswith("/") & ~F.text.in_({"📨 Авторассылка", "📝 Текст сообщения", "👥 Настройка групп", "⏱ Интервал", "👤 Профили", "📖 Инструкция", "⏹ Остановить", "❔ Помощь"}))
     async def process_login_input(message: Message) -> None:
         uid = message.from_user.id
         state = pending_logins.get(uid)
