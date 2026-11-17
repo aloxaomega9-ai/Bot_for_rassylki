@@ -78,7 +78,10 @@ async def register_user(session: AsyncSession, telegram_user_id: int) -> User:
 async def list_accounts(session: AsyncSession, telegram_user_id: int) -> list[ConnectedAccount]:
     result = await session.scalars(
         select(ConnectedAccount)
-        .where(ConnectedAccount.telegram_user_id == telegram_user_id)
+        .where(
+            ConnectedAccount.telegram_user_id == telegram_user_id,
+            ConnectedAccount.is_active.is_(True),
+        )
         .order_by(ConnectedAccount.id)
     )
     return list(result)
