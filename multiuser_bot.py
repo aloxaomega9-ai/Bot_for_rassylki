@@ -7,7 +7,7 @@ import asyncio
 import logging
 import os
 
-from aiohttp import web
+from aiohttp import ClientSession, ClientTimeout, web
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -555,9 +555,43 @@ async def main() -> None:
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", "10000")))
     await site.start()
+
+    async def keep_alive() -> None:
+        """Send inbound HTTP traffic through Render's public proxy periodically."""
+        public_url = os.getenv("RENDER_EXTERNAL_URL")
+        if not public_url:
+            logging.info("RENDER_EXTERNAL_URL is not set; keep-alive is disabled")
+            return
+
+        health_url = f"{public_url.rstrip('/')}/health"
+        timeout = ClientTimeout(total=15)
+        async with ClientSession(timeout=timeout) as http:
+            while True:
+                await asyncio.sleep(9 * 60)
+                try:
+                    async with http.get(health_url) as response:
+                        await response.read()
+                        if response.status == 200:
+                            logging.info("Render keep-alive ping succeeded")
+                        else:
+                            logging.warning(
+                                "Render keep-alive ping returned HTTP %s",
+                                response.status,
+                            )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logging.warning("Render keep-alive ping failed", exc_info=True)
+
+    keep_alive_task = asyncio.create_task(keep_alive(), name="render-keep-alive")
     try:
         await dp.start_polling(bot)
     finally:
+        keep_alive_task.cancel()
+        try:
+            await keep_alive_task
+        except asyncio.CancelledError:
+            pass
         await runner.cleanup()
         for state in list(pending_logins.values()):
             client = state.get("client")
