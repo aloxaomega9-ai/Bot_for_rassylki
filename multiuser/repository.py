@@ -12,6 +12,7 @@ from typing import Sequence
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from multiuser.models import (
     AuthorizedChat,
@@ -38,6 +39,12 @@ class AuthorizationRequired(RepositoryError):
     """The selected chat has not been explicitly authorized."""
 
 
+class ActiveJobLimit(RepositoryError):
+    """This user already has an active job."""
+
+
+MAX_TARGETS_PER_JOB = 20
+
 _ALLOWED_TRANSITIONS = {
     "pending": {"running", "cancelled"},
     "running": {"paused", "completed", "cancelled", "failed"},
@@ -51,11 +58,15 @@ _ALLOWED_TRANSITIONS = {
 async def register_user(session: AsyncSession, telegram_user_id: int) -> User:
     if telegram_user_id <= 0:
         raise ValueError("telegram_user_id must be a positive integer")
+    statement = (
+        pg_insert(User)
+        .values(telegram_user_id=telegram_user_id, is_active=True)
+        .on_conflict_do_nothing(index_elements=[User.telegram_user_id])
+    )
+    await session.execute(statement)
     user = await session.get(User, telegram_user_id)
     if user is None:
-        user = User(telegram_user_id=telegram_user_id, is_active=True)
-        session.add(user)
-        await session.flush()
+        raise RepositoryError("could not register user")
     return user
 
 
@@ -222,7 +233,10 @@ async def create_job(
     target_chat_ids: Sequence[int],
 ) -> BroadcastJob:
     """Create a job only for explicitly authorized chats owned by this account."""
-    user = await session.get(User, telegram_user_id)
+    # Locking the user row serializes concurrent job creation for this tenant.
+    user = await session.scalar(
+        select(User).where(User.telegram_user_id == telegram_user_id).with_for_update()
+    )
     if user is None or not user.is_active:
         raise NotFound("active user not found")
     await get_owned_account(session, telegram_user_id, account_id)
@@ -230,6 +244,17 @@ async def create_job(
     unique_ids = list(dict.fromkeys(target_chat_ids))
     if not unique_ids:
         raise AuthorizationRequired("at least one explicitly authorized chat is required")
+    if len(unique_ids) > MAX_TARGETS_PER_JOB:
+        raise RepositoryError(f"job target limit is {MAX_TARGETS_PER_JOB} chats")
+
+    active_job_id = await session.scalar(
+        select(BroadcastJob.id).where(
+            BroadcastJob.telegram_user_id == telegram_user_id,
+            BroadcastJob.status.in_({"pending", "running", "paused"}),
+        ).limit(1)
+    )
+    if active_job_id is not None:
+        raise ActiveJobLimit("one active job per user is supported in this release")
 
     targets = await session.scalars(
         select(AuthorizedChat).where(
