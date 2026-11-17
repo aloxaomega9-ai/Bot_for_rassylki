@@ -43,7 +43,7 @@ class ActiveJobLimit(RepositoryError):
     """This user already has an active job."""
 
 
-MAX_TARGETS_PER_JOB = 20
+MAX_TARGETS_PER_JOB = 50
 
 _ALLOWED_TRANSITIONS = {
     "pending": {"running", "cancelled"},
