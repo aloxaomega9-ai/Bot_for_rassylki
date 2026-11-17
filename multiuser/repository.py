@@ -12,7 +12,7 @@ from typing import Sequence
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 
 from multiuser.models import (
     AuthorizedChat,
@@ -58,15 +58,20 @@ _ALLOWED_TRANSITIONS = {
 async def register_user(session: AsyncSession, telegram_user_id: int) -> User:
     if telegram_user_id <= 0:
         raise ValueError("telegram_user_id must be a positive integer")
-    statement = (
-        pg_insert(User)
-        .values(telegram_user_id=telegram_user_id, is_active=True)
-        .on_conflict_do_nothing(index_elements=[User.telegram_user_id])
-    )
-    await session.execute(statement)
     user = await session.get(User, telegram_user_id)
-    if user is None:
-        raise RepositoryError("could not register user")
+    if user is not None:
+        return user
+
+    # The savepoint handles two /start updates arriving at almost the same time.
+    try:
+        async with session.begin_nested():
+            user = User(telegram_user_id=telegram_user_id, is_active=True)
+            session.add(user)
+            await session.flush()
+    except IntegrityError:
+        user = await session.get(User, telegram_user_id)
+        if user is None:
+            raise RepositoryError("could not register user")
     return user
 
 
