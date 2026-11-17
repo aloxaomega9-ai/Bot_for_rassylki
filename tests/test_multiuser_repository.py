@@ -149,4 +149,6 @@ async def test_user_deletion_removes_owned_service_records(session):
     assert await session.get(User, 808) is None
     assert await session.get(ConnectedAccount, account.id) is None
     remaining_targets = await session.scalars(
-        select(BroadcastJobTarget).where(BroadcastJobTarget.job_id == job.id)\n    )\n    assert list(remaining_targets) == []
+        select(BroadcastJobTarget).where(BroadcastJobTarget.job_id == job.id)
+    )
+    assert list(remaining_targets) == []
