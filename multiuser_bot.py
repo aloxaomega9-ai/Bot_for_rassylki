@@ -515,7 +515,7 @@ async def main() -> None:
         accounts = await service.accounts(message.from_user.id)
         if accounts:
             labels = [account.label or f"Аккаунт #{account.id}" for account in accounts]
-            await message.answer("Подключённый профиль:\\n" + "\\n".join(labels) + "\\nОтключить: /disconnect")
+            await message.answer("Подключённый профиль:\n" + "\n".join(labels) + "\nОтключить: /disconnect")
         else:
             await message.answer("Аккаунт ещё не подключён. Для подключения: /connect")
 
@@ -530,7 +530,7 @@ async def main() -> None:
 
     @dp.message(F.text.in_({"📖 Инструкция", "❔ Помощь"}))
     async def menu_help(message: Message) -> None:
-        await message.answer("Подключение: /connect\\nГруппы: /chats\\nОтправка: /send текст\\nОтмена входа: /cancel\\nОтключение: /disconnect\\nСтатус: /status", reply_markup=main_keyboard())
+        await message.answer("Подключение: /connect\nГруппы: /chats\nОтправка: /send текст\nОтмена входа: /cancel\nОтключение: /disconnect\nСтатус: /status", reply_markup=main_keyboard())
 
     @dp.message(Command("menu"))
     async def show_menu(message: Message) -> None:
