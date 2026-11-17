@@ -40,7 +40,8 @@ NOTICE = (
 )
 
 pending_logins: dict[int, tuple[object, asyncio.Task]] = {}
-pending_sends: dict[int, tuple[int, list[int], str]] = {}\nactive_jobs: dict[int, asyncio.Task] = {}
+pending_sends: dict[int, tuple[int, list[int], str]] = {}
+active_jobs: dict[int, asyncio.Task] = {}
 
 
 def notice_keyboard():
