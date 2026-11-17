@@ -9,6 +9,7 @@ import logging
 import os
 import time
 
+from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -413,9 +414,21 @@ async def main() -> None:
         )
 
     logging.basicConfig(level=logging.INFO)
+    if os.getenv("ALLOW_SCHEMA_CREATE") == "1":
+        from multiuser.schema import create_schema
+        await create_schema()
+
+    health_app = web.Application()
+    health_app.router.add_get("/", lambda _request: web.Response(text="ok"))
+    health_app.router.add_get("/health", lambda _request: web.Response(text="ok"))
+    runner = web.AppRunner(health_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", "10000")))
+    await site.start()
     try:
         await dp.start_polling(bot)
     finally:
+        await runner.cleanup()
         for client, task in list(pending_logins.values()):
             task.cancel()
             try:
