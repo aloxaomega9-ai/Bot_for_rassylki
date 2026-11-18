@@ -6,6 +6,8 @@ credentials are used only in memory and are never persisted or logged.
 import asyncio
 import logging
 import os
+import time
+from html import escape
 
 from aiohttp import ClientSession, ClientTimeout, web
 from aiogram import Bot, Dispatcher, F
@@ -40,7 +42,8 @@ NOTICE = (
 )
 
 pending_logins: dict[int, dict] = {}
-pending_sends: dict[int, tuple[int, list[int], str]] = {}
+pending_sends: dict[int, tuple[int, list[int], str, float]] = {}
+pending_compositions: set[int] = set()
 active_jobs: dict[int, asyncio.Task] = {}
 
 
@@ -70,6 +73,34 @@ def confirm_keyboard():
     keyboard.button(text="✅ Подтвердить отправку", callback_data="send:confirm")
     keyboard.button(text="Отмена", callback_data="send:cancel")
     keyboard.adjust(1)
+    return keyboard.as_markup()
+
+
+def compose_keyboard():
+    keyboard = InlineKeyboardBuilder()
+    keyboard.button(text="❌ Отмена", callback_data="broadcast:compose_cancel")
+    return keyboard.as_markup()
+
+
+def broadcast_keyboard():
+    keyboard = InlineKeyboardBuilder()
+    keyboard.button(text="✍️ Подготовить сообщение", callback_data="broadcast:prepare")
+    keyboard.button(text="👥 Группы", callback_data="broadcast:groups")
+    keyboard.button(text="⏱ Интервал", callback_data="broadcast:interval")
+    keyboard.button(text="📊 Обновить", callback_data="broadcast:refresh")
+    keyboard.button(text="⏹ Остановить", callback_data="broadcast:stop")
+    keyboard.adjust(1, 2, 2)
+    return keyboard.as_markup()
+
+
+def interval_keyboard(current: int):
+    keyboard = InlineKeyboardBuilder()
+    for seconds in (30, 60, 120, 300):
+        label = f"{seconds} сек." if seconds < 60 else f"{seconds // 60} мин."
+        if seconds == current:
+            label = "✓ " + label
+        keyboard.button(text=label, callback_data=f"interval:set:{seconds}")
+    keyboard.adjust(2)
     return keyboard.as_markup()
 
 
@@ -106,9 +137,12 @@ async def main() -> None:
 
     @dp.message(CommandStart())
     async def start(message: Message) -> None:
-        if not message.from_user:
+        if not message.from_user or message.chat.type != "private":
             return
         await service.register(message.from_user.id)
+        if await accepted(service, message.from_user.id):
+            await message.answer("С возвращением. Главное меню:", reply_markup=main_keyboard())
+            return
         await message.answer(NOTICE, reply_markup=notice_keyboard())
 
     @dp.callback_query(F.data == "notice:accept")
@@ -145,7 +179,10 @@ async def main() -> None:
 
     @dp.message(Command("cancel"))
     async def cancel_login(message: Message) -> None:
-        state = pending_logins.pop(message.from_user.id, None)
+        uid = message.from_user.id
+        pending_sends.pop(uid, None)
+        pending_compositions.discard(uid)
+        state = pending_logins.pop(uid, None)
         if state:
             client = state.get("client")
             if client is not None:
@@ -156,7 +193,13 @@ async def main() -> None:
                     logging.exception("temporary login disconnect failed")
             await message.answer("Подключение отменено.")
         else:
-            await message.answer("Нет активного процесса подключения.")
+            await message.answer("Подготовка отправки/подключение отменено.")
+
+    @dp.message(lambda message: message.from_user and message.from_user.id in pending_compositions and message.text and not message.text.startswith("/"))
+    async def capture_broadcast_text(message: Message) -> None:
+        uid = message.from_user.id
+        pending_compositions.discard(uid)
+        await prepare_broadcast_text(message, uid, message.text or "")
 
     @dp.message(F.text & ~F.text.startswith("/") & ~F.text.in_({"📨 Авторассылка", "📝 Текст сообщения", "👥 Настройка групп", "⏱ Интервал", "👤 Профили", "📖 Инструкция", "⏹ Остановить", "❔ Помощь"}))
     async def process_login_input(message: Message) -> None:
@@ -266,9 +309,9 @@ async def main() -> None:
                 pass
             pending_logins.pop(uid, None)
 
-    @dp.message(Command("chats"))
-    async def chats(message: Message) -> None:
-        uid = message.from_user.id
+    async def show_chats(message: Message, uid: int) -> None:
+        if message.chat.type != "private":
+            return await message.answer("Управление списком групп доступно только в личном чате с ботом.")
         if not await accepted(service, uid):
             return await message.answer("Сначала примите уведомление через /start.")
         accounts = await service.accounts(uid)
@@ -307,6 +350,10 @@ async def main() -> None:
             reply_markup=keyboard.as_markup() if rows else None,
         )
 
+    @dp.message(Command("chats"))
+    async def chats(message: Message) -> None:
+        await show_chats(message, message.from_user.id)
+
     @dp.callback_query(F.data.startswith("chat:toggle:"))
     async def toggle_chat(callback: CallbackQuery) -> None:
         uid = callback.from_user.id
@@ -335,14 +382,18 @@ async def main() -> None:
             logging.exception("chat authorization toggle failed")
             await callback.answer("Не удалось изменить разрешение", show_alert=True)
 
-    @dp.message(Command("send"))
-    async def prepare_send(message: Message) -> None:
-        uid = message.from_user.id
+    async def prepare_broadcast_text(message: Message, uid: int, text: str) -> None:
+        if message.chat.type != "private":
+            return await message.answer("Подготовка отправки доступна только в личном чате с ботом.")
+        text = text.strip()
+        if not text:
+            return await message.answer("Текст пустой. Попробуйте снова.")
+        if len(text) > 4096:
+            return await message.answer("Текст слишком длинный. Максимум 4096 символов.")
         if not await accepted(service, uid):
             return await message.answer("Сначала примите уведомление через /start.")
-        text = (message.text or "").partition(" ")[2].strip()
-        if not text:
-            return await message.answer("Формат: /send текст сообщения")
+        if uid in active_jobs:
+            return await message.answer("У вас уже выполняется отправка. Сначала остановите её.")
         accounts = await service.accounts(uid)
         if not accounts:
             return await message.answer("Сначала подключите аккаунт: /connect")
@@ -351,12 +402,26 @@ async def main() -> None:
         if not chats:
             return await message.answer("Нет разрешённых групп. Выполните /chats и включите нужные.")
         chat_ids = [chat.chat_id for chat in chats[:50]]
-        pending_sends[uid] = (account.id, chat_ids, text)
+        pending_sends[uid] = (account.id, chat_ids, text, time.monotonic())
+        preview = escape(text[:300]) + ("…" if len(text) > 300 else "")
+        interval = await service.get_interval(uid)
         await message.answer(
-            f"Подтвердите отправку текста в {len(chat_ids)} групп(ы). "
-            "Отправка начнётся только после подтверждения.",
+            f"<b>Проверка перед отправкой</b>\n\n"
+            f"Получателей: <b>{len(chat_ids)}</b> разрешённых групп\n"
+            f"Пауза: <b>{interval} сек.</b>\n\n"
+            f"<blockquote>{preview}</blockquote>\n\n"
+            "Подтвердите только если группы ожидают это сообщение. "
+            "Подтверждение действует 10 минут.",
             reply_markup=confirm_keyboard(),
         )
+
+    @dp.message(Command("send"))
+    async def prepare_send(message: Message) -> None:
+        uid = message.from_user.id
+        text = (message.text or "").partition(" ")[2]
+        if not text:
+            return await message.answer("Формат: /send текст сообщения")
+        await prepare_broadcast_text(message, uid, text)
 
     @dp.callback_query(F.data == "send:cancel")
     async def cancel_send(callback: CallbackQuery) -> None:
@@ -375,13 +440,16 @@ async def main() -> None:
             session_string = await service.get_account_session(uid, account_id)
             client = new_user_client(session_string, uid)
             await client.start()
-            for chat_id in chat_ids:
+            interval_seconds = await service.get_interval(uid)
+            for index, chat_id in enumerate(chat_ids):
                 if not await service.chat_is_authorized(uid, account_id, chat_id):
                     skipped += 1
                     continue
                 try:
                     await client.send_message(chat_id, text_to_send)
                     sent += 1
+                    if index < len(chat_ids) - 1:
+                        await asyncio.sleep(interval_seconds)
                 except FloodWait as exc:
                     await service.change_job_status(uid, job_id, "failed")
                     await status_message.answer(
@@ -421,9 +489,11 @@ async def main() -> None:
         pending = pending_sends.pop(uid, None)
         if not pending:
             return await callback.answer("Задача устарела. Подготовьте /send заново.", show_alert=True)
+        if time.monotonic() - pending[3] > 600:
+            return await callback.answer("Подтверждение истекло. Подготовьте сообщение заново.", show_alert=True)
         if uid in active_jobs:
             return await callback.answer("У вас уже выполняется отправка.", show_alert=True)
-        account_id, chat_ids, text_to_send = pending
+        account_id, chat_ids, text_to_send, _created_at = pending
         await callback.message.edit_text("⏳ Отправка запущена. Для остановки используйте /stop.")
         task = asyncio.create_task(execute_broadcast(uid, account_id, chat_ids, text_to_send, callback.message))
         active_jobs[uid] = task
@@ -490,21 +560,103 @@ async def main() -> None:
         await message.answer("Данные профиля удалены. Подключённые сессии отозваны, если Telegram был доступен.")
 
 
+    async def broadcast_panel_text(uid: int) -> str:
+        accounts = await service.accounts(uid)
+        authorized_count = 0
+        account_label = "не подключён"
+        interval = 60
+        if accounts:
+            account_label = accounts[0].label or f"Аккаунт #{accounts[0].id}"
+            authorized_count = len(await service.authorized_chats(uid, accounts[0].id))
+            interval = await service.get_interval(uid)
+        running = uid in active_jobs and not active_jobs[uid].done()
+        return (
+            "<b>📨 Панель рассылки</b>\n\n"
+            f"Аккаунт: {escape(account_label)}\n"
+            f"Разрешённых групп: <b>{authorized_count}</b>\n"
+            f"Интервал: <b>{interval} сек.</b>\n"
+            f"Статус: {'🟢 выполняется' if running else '⚪ нет активной задачи'}\n\n"
+            "Рассылка — только один текстовый запуск, максимум 50 групп; "
+            "перед стартом требуется подтверждение."
+        )
+
+    @dp.callback_query(F.data == "broadcast:prepare")
+    async def broadcast_prepare(callback: CallbackQuery) -> None:
+        pending_compositions.add(callback.from_user.id)
+        await callback.message.answer("Отправьте текст следующим сообщением. Перед отправкой появится предпросмотр и подтверждение.", reply_markup=compose_keyboard())
+        await callback.answer()
+
+    @dp.callback_query(F.data == "broadcast:compose_cancel")
+    async def broadcast_compose_cancel(callback: CallbackQuery) -> None:
+        pending_compositions.discard(callback.from_user.id)
+        await callback.message.edit_text("Составление сообщения отменено.")
+        await callback.answer()
+
+    @dp.callback_query(F.data == "broadcast:groups")
+    async def broadcast_groups(callback: CallbackQuery) -> None:
+        await show_chats(callback.message, callback.from_user.id)
+        await callback.answer()
+
+    @dp.callback_query(F.data == "broadcast:interval")
+    async def broadcast_interval(callback: CallbackQuery) -> None:
+        seconds = await service.get_interval(callback.from_user.id)
+        await callback.message.answer("⏱ Выберите интервал между отправками в разрешённые группы:", reply_markup=interval_keyboard(seconds))
+        await callback.answer()
+
+    @dp.callback_query(F.data == "broadcast:refresh")
+    async def broadcast_refresh(callback: CallbackQuery) -> None:
+        try:
+            await callback.message.edit_text(await broadcast_panel_text(callback.from_user.id), reply_markup=broadcast_keyboard())
+            await callback.answer("Обновлено")
+        except Exception:
+            await callback.answer("Панель уже актуальна", show_alert=False)
+
+    @dp.callback_query(F.data == "broadcast:stop")
+    async def broadcast_stop(callback: CallbackQuery) -> None:
+        task = active_jobs.get(callback.from_user.id)
+        if task is None or task.done():
+            await callback.answer("Активной отправки нет")
+        else:
+            task.cancel()
+            await callback.answer("Запрос на остановку отправлен")
+
     @dp.message(F.text == "📨 Авторассылка")
     async def menu_broadcast(message: Message) -> None:
-        await message.answer("Подготовить отправку: /send ваш текст. Бот запросит подтверждение перед началом.")
+        await message.answer(await broadcast_panel_text(message.from_user.id), reply_markup=broadcast_keyboard())
 
     @dp.message(F.text == "📝 Текст сообщения")
     async def menu_text(message: Message) -> None:
-        await message.answer("Введите текст командой: /send ваш текст сообщения")
+        pending_compositions.add(message.from_user.id)
+        await message.answer("Отправьте текст следующим сообщением. Перед отправкой появится предпросмотр и подтверждение.", reply_markup=compose_keyboard())
 
     @dp.message(F.text == "👥 Настройка групп")
     async def menu_chats(message: Message) -> None:
-        await message.answer("Откройте список групп: /chats. Нажмите на группу, чтобы разрешить или запретить отправку.")
+        await message.answer("Управление группами: выполните /chats, затем разрешайте отправку только в группах, где сообщения ожидают.")
 
     @dp.message(F.text == "⏱ Интервал")
     async def menu_interval(message: Message) -> None:
-        await message.answer("Настройка интервала пока не реализована. Кнопка оставлена как пункт будущего обновления.")
+        seconds = await service.get_interval(message.from_user.id)
+        await message.answer(
+            f"⏱ <b>Интервал между сообщениями</b>\n\n"
+            f"Сейчас: <b>{seconds} сек.</b>\n"
+            "Выберите паузу между отправками в разрешённые группы:",
+            reply_markup=interval_keyboard(seconds),
+        )
+
+    @dp.callback_query(F.data.startswith("interval:set:"))
+    async def set_interval(callback: CallbackQuery) -> None:
+        try:
+            seconds = int(callback.data.rsplit(":", 1)[1])
+            await service.set_interval(callback.from_user.id, seconds)
+            label = f"{seconds} сек." if seconds < 60 else f"{seconds // 60} мин."
+            await callback.message.edit_text(
+                f"✅ Интервал сохранён: <b>{label}</b>. Он будет применяться к следующим рассылкам.",
+                reply_markup=interval_keyboard(seconds),
+            )
+            await callback.answer("Настройка сохранена")
+        except Exception:
+            logging.exception("Could not update broadcast interval")
+            await callback.answer("Не удалось сохранить интервал", show_alert=True)
 
     @dp.message(F.text == "👤 Профили")
     async def menu_profiles(message: Message) -> None:
@@ -518,7 +670,7 @@ async def main() -> None:
     @dp.message(F.text == "⏹ Остановить")
     async def menu_stop(message: Message) -> None:
         task = active_jobs.get(message.from_user.id)
-        if task is None:
+        if task is None or task.done():
             await message.answer("Активной отправки нет.")
         else:
             task.cancel()
@@ -526,7 +678,12 @@ async def main() -> None:
 
     @dp.message(F.text.in_({"📖 Инструкция", "❔ Помощь"}))
     async def menu_help(message: Message) -> None:
-        await message.answer("Подключение: /connect\nГруппы: /chats\nОтправка: /send текст\nОтмена входа: /cancel\nОтключение: /disconnect\nСтатус: /status", reply_markup=main_keyboard())
+        await message.answer(
+            "Подключение: /connect\nГруппы: /chats\nОтправка: /send текст\n"
+            "Отмена: /cancel\nОтключение: /disconnect\nСтатус: /status\n"
+            "Перед отправкой проверьте список разрешённых групп и текст.",
+            reply_markup=main_keyboard(),
+        )
 
     @dp.message(Command("menu"))
     async def show_menu(message: Message) -> None:
