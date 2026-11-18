@@ -83,3 +83,13 @@ class BroadcastJobTarget(Base):
     )
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="pending")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class UserSettings(Base):
+    """Per-user broadcast preferences."""
+    __tablename__ = "user_settings"
+
+    telegram_user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_user_id", ondelete="CASCADE"), primary_key=True
+    )
+    interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=60)
