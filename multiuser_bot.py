@@ -295,9 +295,7 @@ async def main() -> None:
                 pass
             pending_logins.pop(uid, None)
 
-    @dp.message(Command("chats"))
-    async def chats(message: Message) -> None:
-        uid = message.from_user.id
+    async def show_chats(message: Message, uid: int) -> None:
         if message.chat.type != "private":
             return await message.answer("Управление списком групп доступно только в личном чате с ботом.")
         if not await accepted(service, uid):
@@ -337,6 +335,10 @@ async def main() -> None:
             "Сам факт участия аккаунта в группе не означает согласие на рассылку.",
             reply_markup=keyboard.as_markup() if rows else None,
         )
+
+    @dp.message(Command("chats"))
+    async def chats(message: Message) -> None:
+        await show_chats(message, message.from_user.id)
 
     @dp.callback_query(F.data.startswith("chat:toggle:"))
     async def toggle_chat(callback: CallbackQuery) -> None:
@@ -565,7 +567,7 @@ async def main() -> None:
 
     @dp.callback_query(F.data == "broadcast:groups")
     async def broadcast_groups(callback: CallbackQuery) -> None:
-        await callback.message.answer("Управление группами: выполните /chats, затем включайте разрешение только там, где сообщения ожидают.")
+        await show_chats(callback.message, callback.from_user.id)
         await callback.answer()
 
     @dp.callback_query(F.data == "broadcast:interval")
