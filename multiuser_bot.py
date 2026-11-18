@@ -41,6 +41,7 @@ NOTICE = (
 
 pending_logins: dict[int, dict] = {}
 pending_sends: dict[int, tuple[int, list[int], str]] = {}
+composing_message: set[int] = set()
 active_jobs: dict[int, asyncio.Task] = {}
 
 
@@ -156,6 +157,8 @@ async def main() -> None:
 
     @dp.message(Command("cancel"))
     async def cancel_login(message: Message) -> None:
+        composing_message.discard(message.from_user.id)
+        pending_sends.pop(message.from_user.id, None)
         state = pending_logins.pop(message.from_user.id, None)
         if state:
             client = state.get("client")
@@ -346,6 +349,34 @@ async def main() -> None:
             logging.exception("chat authorization toggle failed")
             await callback.answer("Не удалось изменить разрешение", show_alert=True)
 
+    @dp.message(F.text & ~F.text.startswith("/") & (F.chat.type == "private"))
+    async def compose_message_input(message: Message) -> None:
+        uid = message.from_user.id
+        if uid not in composing_message:
+            return
+        composing_message.discard(uid)
+        text_to_send = (message.text or "").strip()
+        if not text_to_send:
+            return await message.answer("Сообщение пустое. Нажмите «📝 Текст сообщения» и попробуйте снова.")
+        if not await accepted(service, uid):
+            return await message.answer("Сначала примите уведомление через /start.")
+        accounts = await service.accounts(uid)
+        if not accounts:
+            return await message.answer("Сначала подключите аккаунт через /connect.")
+        account = accounts[0]
+        chats = await service.authorized_chats(uid, account.id)
+        if not chats:
+            return await message.answer("Сначала выберите группы через «👥 Настройка групп».")
+        chat_ids = [chat.chat_id for chat in chats[:50]]
+        pending_sends[uid] = (account.id, chat_ids, text_to_send)
+        await message.answer(
+            "<b>Предпросмотр сообщения</b>\\n\\n"
+            f"{text_to_send}\\n\\n"
+            f"Получатели: {len(chat_ids)} выбранных групп\\n"
+            "Отправка начнётся только после подтверждения. Убедитесь, что эти группы ожидают сообщение.",
+            reply_markup=confirm_keyboard(),
+        )
+
     @dp.message(Command("send"))
     async def prepare_send(message: Message) -> None:
         uid = message.from_user.id
@@ -503,11 +534,13 @@ async def main() -> None:
 
     @dp.message(F.text == "📨 Авторассылка")
     async def menu_broadcast(message: Message) -> None:
-        await message.answer("Подготовить отправку: /send ваш текст. Бот запросит подтверждение перед началом.")
+        composing_message.add(message.from_user.id)
+        await message.answer("Введите текст сообщения следующим сообщением.\\nОтправка будет только в выбранные группы и после вашего подтверждения. /cancel — отмена.")
 
     @dp.message(F.text == "📝 Текст сообщения")
     async def menu_text(message: Message) -> None:
-        await message.answer("Введите текст командой: /send ваш текст сообщения")
+        composing_message.add(message.from_user.id)
+        await message.answer("Введите текст сообщения. После этого появится предпросмотр и кнопки подтверждения/отмены. /cancel — отмена.")
 
     @dp.message(F.text == "👥 Настройка групп")
     async def menu_chats(message: Message) -> None:
