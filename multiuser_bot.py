@@ -173,7 +173,7 @@ async def main() -> None:
             await message.answer("Нет активного процесса подключения.")
 
     async def handle_composer_input(message: Message) -> None:
-       uid = message.from_user.id
+        uid = message.from_user.id
         if uid not in composing_message:
             return
         composing_message.discard(uid)
