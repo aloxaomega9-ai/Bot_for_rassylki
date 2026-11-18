@@ -65,6 +65,17 @@ def notice_keyboard():
     return keyboard.as_markup()
 
 
+def interval_keyboard(current: int):
+    keyboard = InlineKeyboardBuilder()
+    for seconds in (60, 120, 300):
+        label = f"{seconds // 60} мин."
+        if seconds == current:
+            label = "✓ " + label
+        keyboard.button(text=label, callback_data=f"interval:set:{seconds}")
+    keyboard.adjust(3)
+    return keyboard.as_markup()
+
+
 def confirm_keyboard():
     keyboard = InlineKeyboardBuilder()
     keyboard.button(text="✅ Подтвердить отправку", callback_data="send:confirm")
@@ -504,7 +515,21 @@ async def main() -> None:
 
     @dp.message(F.text == "⏱ Интервал")
     async def menu_interval(message: Message) -> None:
-        await message.answer("Настройка интервала пока не реализована. Кнопка оставлена как пункт будущего обновления.")
+        seconds = await service.get_interval(message.from_user.id)
+        await message.answer(
+            f"⏱ <b>Интервал между отправками</b>\\nСейчас: <b>{seconds // 60} мин.</b>\\nВыберите значение:",
+            reply_markup=interval_keyboard(seconds),
+        )
+
+    @dp.callback_query(F.data.startswith("interval:set:"))
+    async def set_interval(callback: CallbackQuery) -> None:
+        seconds = int(callback.data.rsplit(":", 1)[1])
+        await service.set_interval(callback.from_user.id, seconds)
+        await callback.message.edit_text(
+            f"✅ Интервал сохранён: <b>{seconds // 60} мин.</b>",
+            reply_markup=interval_keyboard(seconds),
+        )
+        await callback.answer("Сохранено")
 
     @dp.message(F.text == "👤 Профили")
     async def menu_profiles(message: Message) -> None:

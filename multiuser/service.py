@@ -9,6 +9,7 @@ from multiuser.repository import (
     list_authorized_chats,
 )
 from multiuser.security import decrypt_session, encrypt_session
+from multiuser.models import UserSettings
 
 
 class MultiUserService:
@@ -93,6 +94,22 @@ class MultiUserService:
         async with self._session_factory() as session:
             async with session.begin():
                 await accept_privacy_notice(session, telegram_user_id, version)
+
+    async def get_interval(self, telegram_user_id: int) -> int:
+        async with self._session_factory() as session:
+            settings = await session.get(UserSettings, telegram_user_id)
+            return settings.interval_seconds if settings else 60
+
+    async def set_interval(self, telegram_user_id: int, seconds: int) -> None:
+        if seconds not in {60, 120, 300}:
+            raise ValueError("unsupported interval")
+        async with self._session_factory() as session:
+            async with session.begin():
+                settings = await session.get(UserSettings, telegram_user_id)
+                if settings is None:
+                    session.add(UserSettings(telegram_user_id=telegram_user_id, interval_seconds=seconds))
+                else:
+                    settings.interval_seconds = seconds
 
     async def delete_user(self, telegram_user_id: int) -> None:
         async with self._session_factory() as session:
