@@ -43,6 +43,7 @@ NOTICE = (
 
 pending_logins: dict[int, dict] = {}
 pending_sends: dict[int, tuple[int, list[int], str, float]] = {}
+pending_compositions: set[int] = set()
 active_jobs: dict[int, asyncio.Task] = {}
 
 
@@ -72,6 +73,12 @@ def confirm_keyboard():
     keyboard.button(text="✅ Подтвердить отправку", callback_data="send:confirm")
     keyboard.button(text="Отмена", callback_data="send:cancel")
     keyboard.adjust(1)
+    return keyboard.as_markup()
+
+
+def compose_keyboard():
+    keyboard = InlineKeyboardBuilder()
+    keyboard.button(text="❌ Отмена", callback_data="broadcast:compose_cancel")
     return keyboard.as_markup()
 
 
@@ -174,6 +181,7 @@ async def main() -> None:
     async def cancel_login(message: Message) -> None:
         uid = message.from_user.id
         pending_sends.pop(uid, None)
+        pending_compositions.discard(uid)
         state = pending_logins.pop(uid, None)
         if state:
             client = state.get("client")
@@ -186,6 +194,12 @@ async def main() -> None:
             await message.answer("Подключение отменено.")
         else:
             await message.answer("Подготовка отправки/подключение отменено.")
+
+    @dp.message(lambda message: message.from_user and message.from_user.id in pending_compositions and message.text and not message.text.startswith("/"))
+    async def capture_broadcast_text(message: Message) -> None:
+        uid = message.from_user.id
+        pending_compositions.discard(uid)
+        await prepare_broadcast_text(message, uid, message.text or "")
 
     @dp.message(F.text & ~F.text.startswith("/") & ~F.text.in_({"📨 Авторассылка", "📝 Текст сообщения", "👥 Настройка групп", "⏱ Интервал", "👤 Профили", "📖 Инструкция", "⏹ Остановить", "❔ Помощь"}))
     async def process_login_input(message: Message) -> None:
@@ -368,18 +382,16 @@ async def main() -> None:
             logging.exception("chat authorization toggle failed")
             await callback.answer("Не удалось изменить разрешение", show_alert=True)
 
-    @dp.message(Command("send"))
-    async def prepare_send(message: Message) -> None:
-        uid = message.from_user.id
+    async def prepare_broadcast_text(message: Message, uid: int, text: str) -> None:
         if message.chat.type != "private":
             return await message.answer("Подготовка отправки доступна только в личном чате с ботом.")
-        if not await accepted(service, uid):
-            return await message.answer("Сначала примите уведомление через /start.")
-        text = (message.text or "").partition(" ")[2].strip()
+        text = text.strip()
         if not text:
-            return await message.answer("Формат: /send текст сообщения")
+            return await message.answer("Текст пустой. Попробуйте снова.")
         if len(text) > 4096:
             return await message.answer("Текст слишком длинный. Максимум 4096 символов.")
+        if not await accepted(service, uid):
+            return await message.answer("Сначала примите уведомление через /start.")
         if uid in active_jobs:
             return await message.answer("У вас уже выполняется отправка. Сначала остановите её.")
         accounts = await service.accounts(uid)
@@ -402,6 +414,14 @@ async def main() -> None:
             "Подтверждение действует 10 минут.",
             reply_markup=confirm_keyboard(),
         )
+
+    @dp.message(Command("send"))
+    async def prepare_send(message: Message) -> None:
+        uid = message.from_user.id
+        text = (message.text or "").partition(" ")[2]
+        if not text:
+            return await message.answer("Формат: /send текст сообщения")
+        await prepare_broadcast_text(message, uid, text)
 
     @dp.callback_query(F.data == "send:cancel")
     async def cancel_send(callback: CallbackQuery) -> None:
@@ -562,7 +582,14 @@ async def main() -> None:
 
     @dp.callback_query(F.data == "broadcast:prepare")
     async def broadcast_prepare(callback: CallbackQuery) -> None:
-        await callback.message.answer("Подготовьте текст командой /send ваш текст. Перед отправкой появится предпросмотр и подтверждение.")
+        pending_compositions.add(callback.from_user.id)
+        await callback.message.answer("Отправьте текст следующим сообщением. Перед отправкой появится предпросмотр и подтверждение.", reply_markup=compose_keyboard())
+        await callback.answer()
+
+    @dp.callback_query(F.data == "broadcast:compose_cancel")
+    async def broadcast_compose_cancel(callback: CallbackQuery) -> None:
+        pending_compositions.discard(callback.from_user.id)
+        await callback.message.edit_text("Составление сообщения отменено.")
         await callback.answer()
 
     @dp.callback_query(F.data == "broadcast:groups")
@@ -599,7 +626,8 @@ async def main() -> None:
 
     @dp.message(F.text == "📝 Текст сообщения")
     async def menu_text(message: Message) -> None:
-        await message.answer("Отправка текста: используйте /send текст. Сначала появится предпросмотр и кнопка подтверждения.")
+        pending_compositions.add(message.from_user.id)
+        await message.answer("Отправьте текст следующим сообщением. Перед отправкой появится предпросмотр и подтверждение.", reply_markup=compose_keyboard())
 
     @dp.message(F.text == "👥 Настройка групп")
     async def menu_chats(message: Message) -> None:
